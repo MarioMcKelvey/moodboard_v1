@@ -377,7 +377,7 @@
     <button id="disconnectBtn" class="btn btn--ghost btn--sm" type="button" hidden>Disconnect</button>
   </div>
   <p class="status-msg" id="statusMsg"></p>
-  <p class="fineprint">Your token is stored only in this browser. Create a <b>fine-grained token</b> with <b>Contents: read and write</b>, scoped to this one repository.</p>
+  <p class="fineprint">Your token is stored only in this browser. Create a <b>fine-grained token</b> with <b>Contents: read and write</b>, scoped to this one repository. <span style="opacity:.55">· package v3</span></p>
 
   <div class="ai-tip">
     <span class="lbl">Share the collage</span>
@@ -569,28 +569,66 @@ function loadImg(src, ms){
    Many hosts (i.pinimg.com/Pinterest, some CDNs) serve images with no
    Access-Control-Allow-Origin header. They display fine on the page, but any
    canvas that draws them becomes "tainted" and cannot be exported as JPG.
-   Fix: retry through image proxies that add open CORS headers, and remember
-   which strategy worked per host so the rest of the board loads fast. */
-var pxStrategy = {};                     /* host -> 'direct' | 'wsrv' | … */
+   Fix: retry through image proxies that add open CORS headers. Free proxies
+   fail transiently (especially under parallel cold-cache requests), so
+   (a) proxy requests go through a small pool instead of firing all at once,
+   (b) the whole chain runs up to 3 rounds until the image loads, and
+   (c) whichever route works is remembered per host for the next images. */
+var pxStrategy = {};                     /* host -> proxy name that worked */
+var pxQueue = [], pxActive = 0;          /* small pool for proxy requests */
+var PX_ACTIVE_MAX = 3;
 function pxUrl(name, url){
   var enc = encodeURIComponent(url);
   if (name === 'wsrv')       return 'https://wsrv.nl/?url=' + enc + '&w=1400&output=jpg&q=85';
+  if (name === 'weserv')     return 'https://images.weserv.nl/?url=' + enc + '&w=1400&output=jpg&q=85';
   if (name === 'allorigins') return 'https://api.allorigins.win/raw?url=' + enc;
   if (name === 'codetabs')   return 'https://api.codetabs.com/v1/proxy?quest=' + enc;
   return url;
 }
+function pxEnqueue(src, ms){
+  return new Promise(function(resolve){
+    pxQueue.push({ src: src, ms: ms, resolve: resolve });
+    pxPump();
+  });
+}
+function pxPump(){
+  while (pxActive < PX_ACTIVE_MAX && pxQueue.length){
+    (function(){
+      var job = pxQueue.shift();
+      pxActive++;
+      loadImg(job.src, job.ms).then(function(im){
+        pxActive--;
+        job.resolve(im);
+        pxPump();
+      });
+    })();
+  }
+}
 function loadImageCors(url){
   var host = '';
   try { host = new URL(url).host; } catch(e){}
-  var names = ['direct', 'wsrv', 'allorigins', 'codetabs'];
-  var good = host && pxStrategy[host];
-  if (good && good !== 'direct')
-    names = [good].concat(names.filter(function(x){ return x !== good; }));
+  var base = ['direct', 'wsrv', 'weserv', 'allorigins', 'codetabs'];
+  var names = [];
+  for (var round = 0; round < 3; round++){
+    var order = base.slice();
+    var good = (round === 0 && host) ? pxStrategy[host] : null;
+    if (good){
+      order = order.filter(function(x){ return x !== good; });
+      order.unshift(good);                 /* the route that worked before */
+    }
+    names = names.concat(order);
+  }
   var i = 0;
   function tryNext(){
     if (i >= names.length) return Promise.resolve(null);
     var nm = names[i++];
-    return loadImg(pxUrl(nm, url), nm === 'direct' ? 12000 : 15000).then(function(im){
+    if (nm === 'direct'){
+      return loadImg(url, 12000).then(function(im){
+        if (im){ if (host) pxStrategy[host] = 'direct'; return im; }
+        return tryNext();
+      });
+    }
+    return pxEnqueue(pxUrl(nm, url), 20000).then(function(im){
       if (im){ if (host) pxStrategy[host] = nm; return im; }
       return tryNext();
     });
@@ -798,7 +836,7 @@ function publishJpg(){
    the current layout — a stored version flag lets a redeployed page republish
    an old collage (e.g. one with placeholder tiles) exactly once */
 var jpgChecked = false;
-var JPG_LAYOUT_VER = 'moodboard.jpgLayout.v2';
+var JPG_LAYOUT_VER = 'moodboard.jpgLayout.v3';   /* bump => auto-republish old collages once */
 function ensureJpgCurrent(){
   if (jpgChecked || !cfg.repo || !cfg.token) return;
   jpgChecked = true;
