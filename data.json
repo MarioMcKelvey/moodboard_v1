@@ -1,6 +1,14 @@
 {
   "name": "Mood Board",
-  "updatedAt": "2026-11-09T08:46:39.892Z",
-  "count": 0,
-  "items": []
+  "updatedAt": "2026-11-09T08:47:21.921Z",
+  "count": 1,
+  "items": [
+    {
+      "id": "abfeeca9-5799-4c8d-883b-f072b558ecec",
+      "url": "https://i.pinimg.com/1200x/bf/f9/07/bff9073a5130a71d06bf340e4f4e7cf2.jpg",
+      "w": null,
+      "h": null,
+      "ts": 1794214041193
+    }
+  ]
 }
