@@ -551,11 +551,6 @@ var JPG_LIMIT = 950 * 1024;        /* keep the published JPG small and fast to l
 var jpgSha = null;
 var jpgBusy = false;
 
-function siteLabel(){
-  var host = location.host || 'local board';
-  var path = location.pathname.replace(/index\.html$/, '');
-  return (host + path).replace(/\/$/, '');
-}
 function collageUrl(){
   try { return new URL('collage.jpg', location.href).toString(); } catch(e){ return 'collage.jpg'; }
 }
@@ -570,99 +565,114 @@ function loadImg(src, ms){
     im.src = src;
   });
 }
-function loadImageCors(url){
-  return loadImg(url, 12000).then(function(im){
-    if (im) return im;
-    /* many hosts (e.g. Pinterest) block cross-origin embedding - retry through the
-       wsrv.nl image proxy, which serves public images with open CORS headers */
-    return loadImg('https://wsrv.nl/?url=' + encodeURIComponent(url) + '&w=1200&output=jpg&q=82', 15000);
-  });
+/* ---- CORS-safe image loading with proxy fallbacks ----------------------
+   Many hosts (i.pinimg.com/Pinterest, some CDNs) serve images with no
+   Access-Control-Allow-Origin header. They display fine on the page, but any
+   canvas that draws them becomes "tainted" and cannot be exported as JPG.
+   Fix: retry through image proxies that add open CORS headers, and remember
+   which strategy worked per host so the rest of the board loads fast. */
+var pxStrategy = {};                     /* host -> 'direct' | 'wsrv' | … */
+function pxUrl(name, url){
+  var enc = encodeURIComponent(url);
+  if (name === 'wsrv')       return 'https://wsrv.nl/?url=' + enc + '&w=1400&output=jpg&q=85';
+  if (name === 'allorigins') return 'https://api.allorigins.win/raw?url=' + enc;
+  if (name === 'codetabs')   return 'https://api.codetabs.com/v1/proxy?quest=' + enc;
+  return url;
 }
-function roundRectPath(ctx, x, y, w, h, r){
-  ctx.beginPath();
-  if (ctx.roundRect){ ctx.roundRect(x, y, w, h, r); return; }
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+function loadImageCors(url){
+  var host = '';
+  try { host = new URL(url).host; } catch(e){}
+  var names = ['direct', 'wsrv', 'allorigins', 'codetabs'];
+  var good = host && pxStrategy[host];
+  if (good && good !== 'direct')
+    names = [good].concat(names.filter(function(x){ return x !== good; }));
+  var i = 0;
+  function tryNext(){
+    if (i >= names.length) return Promise.resolve(null);
+    var nm = names[i++];
+    return loadImg(pxUrl(nm, url), nm === 'direct' ? 12000 : 15000).then(function(im){
+      if (im){ if (host) pxStrategy[host] = nm; return im; }
+      return tryNext();
+    });
+  }
+  return tryNext();
 }
 function drawPlaceholder(ctx, x, y, w, h, url){
   ctx.fillStyle = '#17171d';
-  roundRectPath(ctx, x, y, w, h, 10);
-  ctx.fill();
+  ctx.fillRect(x, y, w, h);
   var label = hostOf(url);
   if (label.length > 30) label = label.slice(0, 29) + '…';
   ctx.fillStyle = '#6d6d79';
   ctx.textAlign = 'center';
-  ctx.font = '500 ' + Math.max(11, Math.min(14, Math.round(w * 0.05))) + 'px Inter, sans-serif';
+  ctx.font = '500 ' + Math.max(11, Math.min(16, Math.round(Math.min(w, h) * 0.08))) + 'px Inter, sans-serif';
   ctx.fillText('⚠ ' + label, x + w / 2, y + h / 2 + 4);
   ctx.textAlign = 'left';
 }
 function buildCollageCanvas(list){
-  var W = list.length > 80 ? 1280 : 1600;
-  var M = 48, G = 18;
-  var baseCols = Math.max(2, Math.min(6, Math.round(W / 300)));
-  var headH = 150;
+  /* Full-bleed collage — the published image is JUST the collage:
+     no header, no margins, no gaps, no background. Images touch each other
+     and exactly fill a standard 16:9 screen (1920×1080; big boards 2560×1440).
+     Row/column counts adapt to the number of URLs, and every image is
+     cover-cropped to its cell, so any board size frames perfectly. */
+  var n = list.length;
+  var W = n > 40 ? 2560 : 1920;
+  var H = Math.round(W * 9 / 16);
 
-  var cells, heights, bodyH, cols;
-  for (var pass = 0; pass < 3; pass++){
-    cols = Math.min(8, baseCols + pass * 2);
-    var colW = (W - M * 2 - G * (cols - 1)) / cols;
-    cells = list.map(function(o){
-      var ratio = (o.w && o.h) ? (o.h / o.w) : 0.75;
-      if (!isFinite(ratio) || ratio <= 0.05) ratio = 0.75;
-      if (ratio > 2.6) ratio = 2.6;
-      if (ratio < 0.35) ratio = 0.35;
-      return { o: o, h: colW * ratio };
-    });
-    heights = [];
-    for (var c = 0; c < cols; c++) heights.push(0);
-    cells.forEach(function(cell){
-      var mi = 0;
-      for (var c2 = 1; c2 < cols; c2++) if (heights[c2] < heights[mi]) mi = c2;
-      cell.x = M + mi * (colW + G);
-      cell.y = heights[mi];
-      cell.w = colW;
-      heights[mi] += cell.h + G;
-    });
-    bodyH = Math.max.apply(null, heights) - G;
-    if (headH + bodyH + M <= 10000) break;
+  /* average aspect ratio of the loaded images (fallback 4:3) */
+  var known = 0, sumA = 0;
+  list.forEach(function(o){
+    var a = (o.w && o.h) ? (o.w / o.h) : 0;
+    if (isFinite(a) && a > 0.2 && a < 5){ sumA += a; known++; }
+  });
+  var avgA = known ? sumA / known : 4 / 3;
+
+  /* choose the row count whose cell shapes best match the images */
+  var bestR = 1, bestScore = Infinity;
+  var maxR = Math.min(n, 12);
+  for (var r = 1; r <= maxR; r++){
+    var bR = Math.floor(n / r), remR = n % r, score = 0;
+    for (var j = 0; j < r; j++){
+      var k = bR + (j < remR ? 1 : 0);
+      var cellA = (W / k) / (H / r);
+      score += Math.abs(Math.log(cellA / avgA)) * k;
+    }
+    if (score < bestScore - 1e-9){ bestScore = score; bestR = r; }
+  }
+
+  /* split images into rows (earlier rows take the remainder) */
+  var base = Math.floor(n / bestR), rem = n % bestR;
+  var rows = [], idx = 0;
+  for (var j2 = 0; j2 < bestR; j2++){
+    var k2 = base + (j2 < rem ? 1 : 0), row = [];
+    for (var m = 0; m < k2; m++) row.push(list[idx++]);
+    rows.push(row);
   }
 
   var cv = document.createElement('canvas');
   cv.width = W;
-  cv.height = Math.max(Math.round(headH + bodyH + M), 900);
+  cv.height = H;
   var ctx = cv.getContext('2d');
+  ctx.fillStyle = '#0d0d10';               /* never visible — cells cover 100% */
+  ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = '#0d0d10';
-  ctx.fillRect(0, 0, cv.width, cv.height);
-
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#f4f4f6';
-  ctx.font = '700 46px "Space Grotesk", Inter, sans-serif';
-  ctx.fillText('Mood Board', M, 88);
-  ctx.fillStyle = '#a4a4af';
-  ctx.font = '400 21px Inter, sans-serif';
-  var n = list.length;
-  ctx.fillText(n + (n === 1 ? ' image' : ' images') + ' · ' + new Date().toISOString().slice(0, 10) + ' · ' + siteLabel(), M, 122);
-
-  cells.forEach(function(cell){
-    var y = headH + cell.y;
-    var o = cell.o;
-    if (o.img && o.img.naturalWidth){
-      ctx.save();
-      roundRectPath(ctx, cell.x, y, cell.w, cell.h, 12);
-      ctx.clip();
-      var iw = o.img.naturalWidth, ih = o.img.naturalHeight;
-      var s = Math.max(cell.w / iw, cell.h / ih);
-      var dw = iw * s, dh = ih * s;
-      ctx.drawImage(o.img, cell.x + (cell.w - dw) / 2, y + (cell.h - dh) / 2, dw, dh);
-      ctx.restore();
-    } else {
-      drawPlaceholder(ctx, cell.x, y, cell.w, cell.h, o.url);
-    }
+  rows.forEach(function(row, ri){
+    var y0 = Math.round(ri * H / rows.length);
+    var y1 = Math.round((ri + 1) * H / rows.length);
+    var k = row.length, ci = 0;
+    row.forEach(function(o){
+      var x0 = Math.round(ci * W / k);
+      var x1 = Math.round((ci + 1) * W / k);
+      var cw = x1 - x0, ch = y1 - y0;
+      if (o.img && o.img.naturalWidth){
+        var iw = o.img.naturalWidth, ih = o.img.naturalHeight;
+        var s = Math.max(cw / iw, ch / ih);   /* cover-crop: fill the cell */
+        var sw = cw / s, sh = ch / s;
+        ctx.drawImage(o.img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, x0, y0, cw, ch);
+      } else {
+        drawPlaceholder(ctx, x0, y0, cw, ch, o.url);
+      }
+      ci++;
+    });
   });
 
   return cv;
@@ -784,16 +794,23 @@ function publishJpg(){
       }
     });
 }
-/* after an already-up-to-date boot, make sure collage.jpg exists at all
-   (e.g. right after the page itself was redeployed with no board changes) */
+/* after an already-up-to-date boot, make sure collage.jpg exists and matches
+   the current layout — a stored version flag lets a redeployed page republish
+   an old collage (e.g. one with placeholder tiles) exactly once */
 var jpgChecked = false;
+var JPG_LAYOUT_VER = 'moodboard.jpgLayout.v2';
 function ensureJpgCurrent(){
   if (jpgChecked || !cfg.repo || !cfg.token) return;
   jpgChecked = true;
+  var stale = false;
+  try { stale = !localStorage.getItem(JPG_LAYOUT_VER); } catch(e){}
   ghGetJpgSha()
     .then(function(s){
       jpgSha = s;
-      if (!s && items.length) return publishJpg();
+      if (items.length && (!s || stale)){
+        try { localStorage.setItem(JPG_LAYOUT_VER, String(Date.now())); } catch(e){}
+        return publishJpg();
+      }
     })
     .catch(function(){});
 }
@@ -1128,7 +1145,10 @@ function boot(){
   cfg = loadJSON(LS_CFG, cfg);
   if (typeof cfg.repo !== 'string') cfg.repo = '';
   if (typeof cfg.token !== 'string') cfg.token = '';
-  items = parseBoard({ items: loadJSON(LS_ITEMS, []) }) || [];
+  /* loadJSON already returns the parsed board (array or {items:[...]}) —
+     passing it through another {items: …} wrapper would double-wrap and
+     parse as an empty board whenever data.json could not be fetched */
+  items = parseBoard(loadJSON(LS_ITEMS, null)) || [];
   repoInput.value = cfg.repo;
   renderCfg();
   updateStatus(cfg.repo && cfg.token ? 'syncing' : 'local', '');
