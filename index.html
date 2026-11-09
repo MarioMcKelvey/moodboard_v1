@@ -387,6 +387,7 @@
       <button id="copyDataBtn" class="btn btn--ghost btn--sm" type="button" hidden>Copy data.json link</button>
     </div>
     <div class="row">
+      <button id="openJpgBtn" class="btn btn--primary btn--sm" type="button" hidden>Open page image</button>
       <button id="jpgBtn" class="btn btn--ghost btn--sm" type="button" hidden>Republish collage.jpg now</button>
     </div>
   </div>
@@ -558,15 +559,23 @@ function siteLabel(){
 function collageUrl(){
   try { return new URL('collage.jpg', location.href).toString(); } catch(e){ return 'collage.jpg'; }
 }
-function loadImageCors(url){
+function loadImg(src, ms){
   return new Promise(function(resolve){
     var im = new Image();
     var settled = false;
-    var to = setTimeout(function(){ if (!settled){ settled = true; resolve(null); } }, 12000);
+    var to = setTimeout(function(){ if (!settled){ settled = true; resolve(null); } }, ms);
     im.onload = function(){ if (!settled){ settled = true; clearTimeout(to); resolve(im); } };
     im.onerror = function(){ if (!settled){ settled = true; clearTimeout(to); resolve(null); } };
     im.crossOrigin = 'anonymous';      /* keeps the canvas untainted so it can be exported */
-    im.src = url;
+    im.src = src;
+  });
+}
+function loadImageCors(url){
+  return loadImg(url, 12000).then(function(im){
+    if (im) return im;
+    /* many hosts (e.g. Pinterest) block cross-origin embedding - retry through the
+       wsrv.nl image proxy, which serves public images with open CORS headers */
+    return loadImg('https://wsrv.nl/?url=' + encodeURIComponent(url) + '&w=1200&output=jpg&q=82', 15000);
   });
 }
 function roundRectPath(ctx, x, y, w, h, r){
@@ -762,7 +771,7 @@ function publishJpg(){
     .then(function(){
       toast('collage.jpg published', 'ok');
       if (failedCount){
-        toast(failedCount + ' of ' + items.length + ' images are placeholders in the JPG (their host blocks embedding).', 'info');
+        toast(failedCount + ' of ' + items.length + ' images could not be embedded and appear as placeholders in the JPG.', 'info');
       }
     })
     .catch(function(err){
@@ -846,7 +855,7 @@ var repoInput = $('#repoInput'), tokenInput = $('#tokenInput');
 var connectBtn = $('#connectBtn'), disconnectBtn = $('#disconnectBtn');
 var connLine = $('#connLine'), connText = $('#connText'), statusMsg = $('#statusMsg');
 var aiTipText = $('#aiTipText'), copyDataBtn = $('#copyDataBtn');
-var copyJpgBtn = $('#copyJpgBtn'), jpgBtn = $('#jpgBtn');
+var copyJpgBtn = $('#copyJpgBtn'), jpgBtn = $('#jpgBtn'), openJpgBtn = $('#openJpgBtn');
 var lightbox = $('#lightbox'), lbImg = $('#lbImg'), lbClose = $('#lbClose');
 var lbPrev = $('#lbPrev'), lbNext = $('#lbNext'), lbCounter = $('#lbCounter');
 var lbHost = $('#lbHost'), lbLink = $('#lbLink');
@@ -882,6 +891,7 @@ function renderCfg(){
   copyDataBtn.hidden = !connected;
   copyJpgBtn.hidden = !connected;
   jpgBtn.hidden = !connected;
+  openJpgBtn.hidden = !connected;
   aiTipText.textContent = '';
   if (connected){
     var b = document.createElement('b'); b.textContent = 'Board is public. ';
@@ -1068,6 +1078,12 @@ jpgBtn.addEventListener('click', function(){
   if (!items.length){ toast('Add some images first', 'info'); return; }
   toast('Rendering collage.jpg…', 'info');
   syncChain = syncChain.then(function(){ return publishJpg(); }).catch(function(){});
+});
+openJpgBtn.addEventListener('click', function(){
+  var u = collageUrl();
+  var w = null;
+  try { w = window.open(u, '_blank', 'noopener'); } catch(e){ }
+  if (!w) toast('Pop-up blocked — allow pop-ups, or use Copy collage.jpg link', 'err');
 });
 function fallbackCopy(text){
   var ta = document.createElement('textarea');
