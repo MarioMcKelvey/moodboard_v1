@@ -4,11 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Mood Board — live collage</title>
-<meta name="description" content="A living mood board collage: add image URLs and the layout adapts. Publicly synced via GitHub Pages — view the page or fetch data.json for the raw list."/>
+<meta name="description" content="A living mood board collage: add image URLs and the layout adapts. Publicly synced via GitHub Pages — view the page, share the whole board as one JPG (collage.jpg), or fetch data.json for the raw list."/>
 <meta name="color-scheme" content="dark"/>
 <meta name="theme-color" content="#0d0d10"/>
 <meta property="og:title" content="Mood Board"/>
-<meta property="og:description" content="A living collage of image URLs — view the page, or fetch data.json for the raw list."/>
+<meta property="og:description" content="A living collage of image URLs — view the page, share the whole board as one JPG (collage.jpg), or fetch data.json for the raw list."/>
+<meta property="og:image" content="collage.jpg"/>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d0d10'/%3E%3Ccircle cx='13' cy='16' r='7' fill='%23ffffff'/%3E%3Ccircle cx='20.5' cy='16' r='7' fill='%2363636e'/%3E%3C/svg%3E"/>
 <link rel="alternate" type="application/json" href="data.json"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
@@ -219,6 +220,7 @@
   }
   .ai-tip p{font-size:12.5px;color:var(--muted);margin-bottom:9px}
   .ai-tip p b{color:var(--text)}
+  .ai-tip .row + .row{margin-top:8px}
 
   /* ---------- fab ---------- */
   .fab{
@@ -378,9 +380,15 @@
   <p class="fineprint">Your token is stored only in this browser. Create a <b>fine-grained token</b> with <b>Contents: read and write</b>, scoped to this one repository.</p>
 
   <div class="ai-tip">
-    <span class="lbl">AI-readable data</span>
-    <p id="aiTipText"><b>Connect sync</b> to publish your collage publicly, then share the page link — or the data link below — with any AI.</p>
-    <button id="copyDataBtn" class="btn btn--ghost btn--sm" type="button" hidden>Copy data.json link</button>
+    <span class="lbl">Share the collage</span>
+    <p id="aiTipText"><b>Connect sync</b> to publish your board — the whole collage is then published as a single JPG you can share with any AI.</p>
+    <div class="row">
+      <button id="copyJpgBtn" class="btn btn--primary btn--sm" type="button" hidden>Copy collage.jpg link</button>
+      <button id="copyDataBtn" class="btn btn--ghost btn--sm" type="button" hidden>Copy data.json link</button>
+    </div>
+    <div class="row">
+      <button id="jpgBtn" class="btn btn--ghost btn--sm" type="button" hidden>Republish collage.jpg now</button>
+    </div>
   </div>
 </aside>
 
@@ -537,6 +545,250 @@ function ghPutFile(jsonStr, attempt){
     });
 }
 
+/* ============================== collage.jpg (single-image export) ============================== */
+var JPG_LIMIT = 950 * 1024;        /* keep the published JPG small and fast to load */
+var jpgSha = null;
+var jpgBusy = false;
+
+function siteLabel(){
+  var host = location.host || 'local board';
+  var path = location.pathname.replace(/index\.html$/, '');
+  return (host + path).replace(/\/$/, '');
+}
+function collageUrl(){
+  try { return new URL('collage.jpg', location.href).toString(); } catch(e){ return 'collage.jpg'; }
+}
+function loadImageCors(url){
+  return new Promise(function(resolve){
+    var im = new Image();
+    var settled = false;
+    var to = setTimeout(function(){ if (!settled){ settled = true; resolve(null); } }, 12000);
+    im.onload = function(){ if (!settled){ settled = true; clearTimeout(to); resolve(im); } };
+    im.onerror = function(){ if (!settled){ settled = true; clearTimeout(to); resolve(null); } };
+    im.crossOrigin = 'anonymous';      /* keeps the canvas untainted so it can be exported */
+    im.src = url;
+  });
+}
+function roundRectPath(ctx, x, y, w, h, r){
+  ctx.beginPath();
+  if (ctx.roundRect){ ctx.roundRect(x, y, w, h, r); return; }
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function drawPlaceholder(ctx, x, y, w, h, url){
+  ctx.fillStyle = '#17171d';
+  roundRectPath(ctx, x, y, w, h, 10);
+  ctx.fill();
+  var label = hostOf(url);
+  if (label.length > 30) label = label.slice(0, 29) + '…';
+  ctx.fillStyle = '#6d6d79';
+  ctx.textAlign = 'center';
+  ctx.font = '500 ' + Math.max(11, Math.min(14, Math.round(w * 0.05))) + 'px Inter, sans-serif';
+  ctx.fillText('⚠ ' + label, x + w / 2, y + h / 2 + 4);
+  ctx.textAlign = 'left';
+}
+function buildCollageCanvas(list){
+  var W = list.length > 80 ? 1280 : 1600;
+  var M = 48, G = 18;
+  var baseCols = Math.max(2, Math.min(6, Math.round(W / 300)));
+  var headH = 150;
+
+  var cells, heights, bodyH, cols;
+  for (var pass = 0; pass < 3; pass++){
+    cols = Math.min(8, baseCols + pass * 2);
+    var colW = (W - M * 2 - G * (cols - 1)) / cols;
+    cells = list.map(function(o){
+      var ratio = (o.w && o.h) ? (o.h / o.w) : 0.75;
+      if (!isFinite(ratio) || ratio <= 0.05) ratio = 0.75;
+      if (ratio > 2.6) ratio = 2.6;
+      if (ratio < 0.35) ratio = 0.35;
+      return { o: o, h: colW * ratio };
+    });
+    heights = [];
+    for (var c = 0; c < cols; c++) heights.push(0);
+    cells.forEach(function(cell){
+      var mi = 0;
+      for (var c2 = 1; c2 < cols; c2++) if (heights[c2] < heights[mi]) mi = c2;
+      cell.x = M + mi * (colW + G);
+      cell.y = heights[mi];
+      cell.w = colW;
+      heights[mi] += cell.h + G;
+    });
+    bodyH = Math.max.apply(null, heights) - G;
+    if (headH + bodyH + M <= 10000) break;
+  }
+
+  var cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = Math.max(Math.round(headH + bodyH + M), 900);
+  var ctx = cv.getContext('2d');
+
+  ctx.fillStyle = '#0d0d10';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f4f4f6';
+  ctx.font = '700 46px "Space Grotesk", Inter, sans-serif';
+  ctx.fillText('Mood Board', M, 88);
+  ctx.fillStyle = '#a4a4af';
+  ctx.font = '400 21px Inter, sans-serif';
+  var n = list.length;
+  ctx.fillText(n + (n === 1 ? ' image' : ' images') + ' · ' + new Date().toISOString().slice(0, 10) + ' · ' + siteLabel(), M, 122);
+
+  cells.forEach(function(cell){
+    var y = headH + cell.y;
+    var o = cell.o;
+    if (o.img && o.img.naturalWidth){
+      ctx.save();
+      roundRectPath(ctx, cell.x, y, cell.w, cell.h, 12);
+      ctx.clip();
+      var iw = o.img.naturalWidth, ih = o.img.naturalHeight;
+      var s = Math.max(cell.w / iw, cell.h / ih);
+      var dw = iw * s, dh = ih * s;
+      ctx.drawImage(o.img, cell.x + (cell.w - dw) / 2, y + (cell.h - dh) / 2, dw, dh);
+      ctx.restore();
+    } else {
+      drawPlaceholder(ctx, cell.x, y, cell.w, cell.h, o.url);
+    }
+  });
+
+  return cv;
+}
+function canvasToJpegB64(cv, cb){
+  var variants = [[1, 0.88], [1, 0.78], [0.85, 0.72], [0.7, 0.62], [0.55, 0.55]];
+  var vi = 0;
+  function attempt(){
+    var v = variants[vi], out = cv;
+    if (v[0] < 1){
+      out = document.createElement('canvas');
+      out.width = Math.max(1, Math.round(cv.width * v[0]));
+      out.height = Math.max(1, Math.round(cv.height * v[0]));
+      var c2 = out.getContext('2d');
+      c2.imageSmoothingEnabled = true;
+      c2.imageSmoothingQuality = 'high';
+      c2.drawImage(cv, 0, 0, out.width, out.height);
+    }
+    try {
+      out.toBlob(function(blob){
+        if (!blob){ cb(new Error('The browser could not encode the collage to JPEG')); return; }
+        if (blob.size > JPG_LIMIT && vi < variants.length - 1){ vi++; attempt(); return; }
+        var fr = new FileReader();
+        fr.onload = function(){ cb(null, String(fr.result).split(',')[1] || '', blob.size); };
+        fr.onerror = function(){ cb(new Error('Could not encode the collage')); };
+        fr.readAsDataURL(blob);
+      }, 'image/jpeg', v[1]);
+    } catch(e){
+      cb(new Error('Embedding blocked: an image host does not allow cross-origin use (CORS).'));
+    }
+  }
+  attempt();
+}
+function ghGetJpgSha(){
+  return fetch(API + '/repos/' + cfg.repo + '/contents/collage.jpg', { headers: ghHeaders(), cache: 'no-store' })
+    .then(function(r){
+      if (r.status === 404) return null;
+      if (r.status === 401 || r.status === 403)
+        throw new Error('GitHub rejected the token (HTTP ' + r.status + ').');
+      if (!r.ok) throw new Error('GitHub API error (HTTP ' + r.status + ').');
+      return r.json().then(function(j){ return j.sha || null; });
+    });
+}
+function ghPutJpg(b64, attempt){
+  attempt = attempt || 1;
+  var body = { message: 'moodboard: publish collage.jpg', content: b64 };
+  if (jpgSha) body.sha = jpgSha;
+  return fetch(API + '/repos/' + cfg.repo + '/contents/collage.jpg', {
+      method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body)
+    })
+    .then(function(r){
+      if (r.status === 409 && attempt < 3){
+        return ghGetJpgSha().then(function(s){ jpgSha = s; return ghPutJpg(b64, attempt + 1); });
+      }
+      if (r.status === 401 || r.status === 403)
+        throw new Error('Commit rejected (HTTP ' + r.status + '). The token needs "Contents: read and write".');
+      if (!r.ok) throw new Error('Commit failed (HTTP ' + r.status + ').');
+      return r.json().then(function(j){ jpgSha = j.content && j.content.sha ? j.content.sha : jpgSha; });
+    });
+}
+function ghDeleteJpg(){
+  return ghGetJpgSha().then(function(s){
+    if (!s) return;
+    return fetch(API + '/repos/' + cfg.repo + '/contents/collage.jpg', {
+        method: 'DELETE', headers: ghHeaders(),
+        body: JSON.stringify({ message: 'moodboard: remove collage.jpg (board is empty)', sha: s })
+      })
+      .then(function(r){
+        if (r.ok || r.status === 404){ jpgSha = null; return; }
+        throw new Error('Could not remove collage.jpg (HTTP ' + r.status + ').');
+      });
+  });
+}
+function publishJpg(){
+  if (!cfg.repo || !cfg.token || jpgBusy) return Promise.resolve();
+  if (!items.length){
+    updateStatus('syncing', 'Board is empty — removing collage.jpg…');
+    return ghDeleteJpg()
+      .then(function(){ toast('collage.jpg removed (board is empty)', 'info'); })
+      .catch(function(err){ toast(err.message || 'collage.jpg could not be removed', 'err'); });
+  }
+  jpgBusy = true;
+  updateStatus('syncing', 'Rendering collage.jpg…');
+  var failedCount = 0;
+  return Promise.all(items.map(function(it){
+      return loadImageCors(it.url).then(function(im){
+        return {
+          img: im, url: it.url,
+          w: it.w || (im ? im.naturalWidth : 0),
+          h: it.h || (im ? im.naturalHeight : 0)
+        };
+      });
+    }))
+    .then(function(list){
+      failedCount = list.filter(function(o){ return !o.img; }).length;
+      return new Promise(function(resolve, reject){
+        canvasToJpegB64(buildCollageCanvas(list), function(err, b64, size){
+          if (err) reject(err); else resolve({ b64: b64, size: size });
+        });
+      });
+    })
+    .then(function(out){
+      updateStatus('syncing', 'Uploading collage.jpg (' + Math.round(out.size / 1024) + ' KB)…');
+      return ghGetJpgSha().then(function(s){ jpgSha = s; return ghPutJpg(out.b64); });
+    })
+    .then(function(){
+      toast('collage.jpg published', 'ok');
+      if (failedCount){
+        toast(failedCount + ' of ' + items.length + ' images are placeholders in the JPG (their host blocks embedding).', 'info');
+      }
+    })
+    .catch(function(err){
+      toast('collage.jpg could not be published: ' + (err && err.message ? err.message : 'unknown error'), 'err');
+    })
+    .then(function(){
+      jpgBusy = false;
+      if (cfg.repo && cfg.token && statusState === 'syncing'){
+        updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json + collage.jpg automatically.');
+      }
+    });
+}
+/* after an already-up-to-date boot, make sure collage.jpg exists at all
+   (e.g. right after the page itself was redeployed with no board changes) */
+var jpgChecked = false;
+function ensureJpgCurrent(){
+  if (jpgChecked || !cfg.repo || !cfg.token) return;
+  jpgChecked = true;
+  ghGetJpgSha()
+    .then(function(s){
+      jpgSha = s;
+      if (!s && items.length) return publishJpg();
+    })
+    .catch(function(){});
+}
+
 /* ============================== sync engine ============================== */
 function queueSync(mode){
   if (!cfg.repo || !cfg.token){ updateStatus('local', ''); return; }
@@ -560,17 +812,23 @@ function runSync(mode){
       var key = arrKey(items);
       if (remote.items && key === arrKey(remote.items)){
         lastPushedKey = key;
-        updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json automatically.');
+        updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json + collage.jpg automatically.');
+        ensureJpgCurrent();
         return;
       }
       if (lastPushedKey === key && mode !== 'reset'){
-        updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json automatically.');
+        updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json + collage.jpg automatically.');
+        ensureJpgCurrent();
         return;
       }
       return ghPutFile(serialize())
         .then(function(){
           lastPushedKey = key;
-          updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json automatically.');
+          updateStatus('syncing', 'Publishing to ' + cfg.repo + ' — committing data.json + rendering collage.jpg…');
+          return publishJpg();
+        })
+        .then(function(){
+          updateStatus('synced', 'Publishing to ' + cfg.repo + ' — every change commits data.json + collage.jpg automatically.');
         });
     })
     .catch(function(err){
@@ -588,6 +846,7 @@ var repoInput = $('#repoInput'), tokenInput = $('#tokenInput');
 var connectBtn = $('#connectBtn'), disconnectBtn = $('#disconnectBtn');
 var connLine = $('#connLine'), connText = $('#connText'), statusMsg = $('#statusMsg');
 var aiTipText = $('#aiTipText'), copyDataBtn = $('#copyDataBtn');
+var copyJpgBtn = $('#copyJpgBtn'), jpgBtn = $('#jpgBtn');
 var lightbox = $('#lightbox'), lbImg = $('#lbImg'), lbClose = $('#lbClose');
 var lbPrev = $('#lbPrev'), lbNext = $('#lbNext'), lbCounter = $('#lbCounter');
 var lbHost = $('#lbHost'), lbLink = $('#lbLink');
@@ -596,7 +855,9 @@ var modalCancel = $('#modalCancel'), modalConfirm = $('#modalConfirm');
 var toasts = $('#toasts');
 
 /* ============================== status UI ============================== */
+var statusState = 'local';
 function updateStatus(state, msg){
+  statusState = state;
   statusPill.className = 'pill pill--' + (state === 'synced' ? 'synced' : state === 'syncing' ? 'syncing' : state === 'error' ? 'error' : 'local');
   statusText.textContent =
     state === 'synced'   ? 'Synced to GitHub' :
@@ -618,20 +879,18 @@ function renderCfg(){
   connectBtn.textContent = connected ? 'Save & reconnect' : 'Connect & publish';
   if (connected && !tokenInput.value) tokenInput.placeholder = '•••••••• (saved — paste to replace)';
   else tokenInput.placeholder = 'ghp_… or github_pat_…';
-  var dataUrl = 'data.json';
-  try { dataUrl = new URL('data.json', location.href).toString(); } catch(e){}
   copyDataBtn.hidden = !connected;
-  if (connected) aiTipText.innerHTML = '';
+  copyJpgBtn.hidden = !connected;
+  jpgBtn.hidden = !connected;
+  aiTipText.textContent = '';
   if (connected){
-    aiTipText.textContent = '';
     var b = document.createElement('b'); b.textContent = 'Board is public. ';
     aiTipText.appendChild(b);
-    aiTipText.appendChild(document.createTextNode('AI tools can read the collage at the JSON link below (or just view this page).'));
+    aiTipText.appendChild(document.createTextNode('The whole collage is published as one JPG — share the collage.jpg link with any AI (or just view this page).'));
   } else {
-    aiTipText.textContent = '';
     var b2 = document.createElement('b'); b2.textContent = 'Connect sync ';
     aiTipText.appendChild(b2);
-    aiTipText.appendChild(document.createTextNode('to publish your collage publicly, then share the page link with any AI.'));
+    aiTipText.appendChild(document.createTextNode('to publish your board — the whole collage is then published as a single JPG you can share with any AI.'));
   }
 }
 
@@ -701,7 +960,7 @@ function addUrl(raw){
 function requestReset(){
   if (!items.length){ toast('The board is already empty', 'info'); return; }
   modalBody.textContent = (cfg.repo && cfg.token)
-    ? 'This removes all ' + items.length + ' images and clears the public board (data.json) on GitHub. This cannot be undone.'
+    ? 'This removes all ' + items.length + ' images and clears the public board (data.json + collage.jpg) on GitHub. This cannot be undone.'
     : 'This removes every image from the board. This cannot be undone.';
   modal.hidden = false;
   modalCancel.focus();
@@ -721,7 +980,7 @@ function connect(){
   if (!token){ toast('Paste a GitHub personal access token', 'err'); return; }
   cfg = { repo: repo, token: token };
   saveCfg();
-  remoteSha = null; lastPushedKey = null;
+  remoteSha = null; lastPushedKey = null; jpgSha = null; jpgChecked = false;
   tokenInput.value = '';
   toast('Connected — publishing your board…', 'ok');
   queueSync('boot');
@@ -729,7 +988,7 @@ function connect(){
 function disconnect(){
   cfg = { repo: '', token: '' };
   saveCfg();
-  remoteSha = null; lastPushedKey = null;
+  remoteSha = null; lastPushedKey = null; jpgSha = null; jpgChecked = false;
   repoInput.value = ''; tokenInput.value = '';
   updateStatus('local', '');
   toast('Disconnected. The last published board stays online.', 'info');
@@ -797,6 +1056,19 @@ copyDataBtn.addEventListener('click', function(){
     navigator.clipboard.writeText(u).then(done, function(){ fallbackCopy(u); done(); });
   } else { fallbackCopy(u); done(); }
 });
+copyJpgBtn.addEventListener('click', function(){
+  var u = collageUrl();
+  function done(){ toast('collage.jpg link copied', 'ok'); }
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(u).then(done, function(){ fallbackCopy(u); done(); });
+  } else { fallbackCopy(u); done(); }
+});
+jpgBtn.addEventListener('click', function(){
+  if (!cfg.repo || !cfg.token){ toast('Connect GitHub sync first', 'err'); return; }
+  if (!items.length){ toast('Add some images first', 'info'); return; }
+  toast('Rendering collage.jpg…', 'info');
+  syncChain = syncChain.then(function(){ return publishJpg(); }).catch(function(){});
+});
 function fallbackCopy(text){
   var ta = document.createElement('textarea');
   ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
@@ -845,6 +1117,10 @@ function boot(){
   renderCfg();
   updateStatus(cfg.repo && cfg.token ? 'syncing' : 'local', '');
   render();
+  try {
+    var og = document.querySelector('meta[property="og:image"]');
+    if (og) og.setAttribute('content', collageUrl());
+  } catch(e){}
 
   fetch('data.json?cb=' + Date.now(), { cache: 'no-store' })
     .then(function(r){ return r.ok ? r.json() : null; })
@@ -863,6 +1139,37 @@ function boot(){
       if (cfg.repo && cfg.token) queueSync('boot');
     });
 }
+/* test hook for automated checks (harmless in production) */
+window.__mbTest = {
+  itemCount: function(){ return items.length; },
+  collageInfo: function(cb){
+    Promise.all(items.map(function(it){
+        return loadImageCors(it.url).then(function(im){
+          return { img: im, url: it.url, w: it.w || (im ? im.naturalWidth : 0), h: it.h || (im ? im.naturalHeight : 0) };
+        });
+      }))
+      .then(function(list){
+        var cv = buildCollageCanvas(list);
+        canvasToJpegB64(cv, function(err, b64, size){
+          if (err){ cb({ error: String(err.message || err) }); return; }
+          var failed = list.filter(function(o){ return !o.img; }).length;
+          cb({ w: cv.width, h: cv.height, bytes: size, placeholders: failed, total: list.length });
+        });
+      })
+      .catch(function(e){ cb({ error: String((e && e.message) || e) }); });
+  },
+  collagePreview: function(el){
+    Promise.all(items.map(function(it){
+        return loadImageCors(it.url).then(function(im){
+          return { img: im, url: it.url, w: it.w || (im ? im.naturalWidth : 0), h: it.h || (im ? im.naturalHeight : 0) };
+        });
+      }))
+      .then(function(list){
+        el.src = buildCollageCanvas(list).toDataURL('image/jpeg', 0.6);
+      });
+  }
+};
+
 boot();
 })();
 </script>
